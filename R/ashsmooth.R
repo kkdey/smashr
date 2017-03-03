@@ -570,7 +570,7 @@ getlist.res = function(res, j, n, zdat, log, shrink, ashparam) {
 	      zdat.ash = withCallingHandlers(do.call(ashr::ash, c(list(betahat = zdat[1, ind], sebetahat = zdat[2, ind]), ashparam)))
         alpha.mv = list(mean = ashr::get_pm(zdat.ash), var = ashr::get_psd(zdat.ash)^2)  #find mean and variance of alpha
     } else {
-        alpha.mv = list(mean = fill.nas(zdat[1, ind]), var = fill.nas(zdat[2, ind])^2)  #find mean and variance of alpha   
+        alpha.mv = list(mean = fill.NAs(zdat[1, ind]), var = fill.NAs(zdat[2, ind])^2)  #find mean and variance of alpha   
     }
     res.j = compute.res(alpha.mv, log)
     res = data.table::rbindlist(list(res, res.j))
@@ -674,8 +674,12 @@ setGlmApproxParam = function(glm.approx.param){
 #' lines(mu.est,col=2)
 #'
 #' @export
-smash.poiss = function(x, post.var = FALSE, log = FALSE, reflect = FALSE, glm.approx.param = list(), 
+smash.poiss = function(x, post.var = FALSE, log = FALSE, 
+                       reflector = FALSE, 
+                       nugget = "none",
+                       glm.approx.param = list(), 
                        ashparam = list(), cxx = TRUE, lev = 0) {
+  
     if (is.matrix(x)) {
         if (nrow(x) == 1) {
             # change matrix x to vector
@@ -690,31 +694,99 @@ smash.poiss = function(x, post.var = FALSE, log = FALSE, reflect = FALSE, glm.ap
     
     if (!is.numeric(x)) 
         stop("Error: invalid parameter 'x': 'x' must be numeric")
-    if (!is.logical(reflect)) 
+    if (!is.logical(reflector)) 
         stop("Error: invalid parameter 'reflect', 'reflect' must be bool")
 
     
     J = log2(length(x))
-    if ((J%%1) != 0) 
-        {
-            reflect = TRUE
-        }  #if ncol(x) is not a power of 2, reflect x
-    if (reflect == TRUE) 
-        reflect.indices = reflect(x)  #reflect signal; this function is pseudo calling x by reference
+    ceil <- ceiling(J)
+    if(reflector){
+      fx <- c(x, x[(length(x)-(1:(2^{ceil}-length(x))))]);
+    }else if(!reflector){
+      fx <- c(x, rep(0, 2^{ceil}-length(x)));
+    }else{fx <- x;}
+    reflect.indices <- 1:length(x)
     
-    n = length(x)
+    
+    
+    # if ((J%%1) != 0) 
+    #     {
+    #         reflect = TRUE
+    #     }  #if ncol(x) is not a power of 2, reflect x
+    # if (reflect == TRUE) 
+    #     reflect.indices = reflect(x)  #reflect signal; this function is pseudo calling x by reference
+    # 
+    n = length(fx)
     J = log2(n)
     
+    
     # create the parent TI table for each signal, and put into rows of matrix y
-    ls = sum(x)
     
     if (!cxx) {
-        y = as.vector(t(ParentTItable(x)$parent))
+        y = as.vector(t(ParentTItable(fx)$parent))
     } else {
-        y = cxxSParentTItable(x)
+        y = cxxSParentTItable(fx)
     }
     
-    zdat = withCallingHandlers(do.call(glm.approx, c(list(x = y, g = NULL), glm.approx.param))) 
+    
+    if(nugget == "all-levels"){
+      success <- y[c(TRUE, FALSE)]
+      failure <- y[c(FALSE, TRUE)]
+      
+      ynew <- as.numeric()
+      
+      for(j in 1:J){
+        ind <- ((j - 1) * n + 1):(j * n)
+        success_res = success[ind]
+        failure_res = failure[ind]
+        seq_res = 1:length(ind)
+        data_res = cbind.data.frame("succ" = success_res, "fail"=failure_res, "seq"=seq_res)
+        fit <- lme4::glmer(cbind(succ, fail) ~  (1|seq), family="binomial", data = data_res)
+        est <- boot::inv.logit(log((success_res + 0.005)/(failure_res + 0.005)) - lme4::ranef(fit)$seq[,1])
+        yodd_res = est*(success_res+failure_res)
+        yeven_res = (1-est)*(success_res+failure_res)
+        ynew_res <- array(0, 2*length(success_res))
+        ynew_res[c(TRUE, FALSE)] = yodd_res
+        ynew_res[c(FALSE, TRUE)] = yeven_res
+        ynew <- c(ynew, ynew_res)
+      }
+      zdat = withCallingHandlers(do.call(glm.approx, c(list(x = ynew, g = NULL), glm.approx.param))) 
+      ls = sum(fx)
+    }else if (nugget == "finest-level"){
+      success <- y[c(TRUE, FALSE)]
+      failure <- y[c(FALSE, TRUE)]
+      
+      
+      for(j in 1:1){
+        ind <- ((j - 1) * n + 1):(j * n)
+        success_res = success[ind]
+        failure_res = failure[ind]
+        seq_res = 1:length(ind)
+        data_res = cbind.data.frame("succ" = success_res, "fail"=failure_res, "seq"=seq_res)
+        fit <- lme4::glmer(cbind(succ, fail) ~  (1|seq), family="binomial", data = data_res)
+        est <- boot::inv.logit(log((success_res + 0.005)/(failure_res + 0.005)) - lme4::ranef(fit)$seq[,1])
+        yodd_res = est*(success_res+failure_res)
+        yeven_res = (1-est)*(success_res+failure_res)
+        ynew_res <- array(0, 2*length(success_res))
+        ynew_res[c(TRUE, FALSE)] = yodd_res
+        ynew_res[c(FALSE, TRUE)] = yeven_res
+      }
+      fx_new <- ynew_res[1:length(fx)]
+      if (!cxx) {
+        ynew = as.vector(t(ParentTItable(fx_new)$parent))
+      } else {
+        ynew = cxxSParentTItable(fx_new)
+      }
+      zdat = withCallingHandlers(do.call(glm.approx, c(list(x = ynew, g = NULL), glm.approx.param))) 
+      ls = sum(fx_new)
+      
+    } else if (nugget == "none"){
+      
+      zdat = withCallingHandlers(do.call(glm.approx, c(list(x = y, g = NULL), glm.approx.param))) 
+      ls <- sum(fx)
+    } else{
+      stop ("The nugget input can take either of 3 options - all-levels, finest-level and none")
+    }
     
     res = list()
     # loop through resolutions, smoothing each resolution separately
@@ -729,7 +801,7 @@ smash.poiss = function(x, post.var = FALSE, log = FALSE, reflect = FALSE, glm.ap
         }
     }
     recons = recons.mv(ls, res, log, n, J)
-    if (reflect == TRUE) {
+    if (reflector == TRUE) {
         recons$est.mean = recons$est.mean[reflect.indices]
         recons$est.var = recons$est.var[reflect.indices]
     }
